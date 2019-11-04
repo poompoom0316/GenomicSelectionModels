@@ -1,0 +1,617 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# 0. 前準備
+
+## データの分け方について
+### 元データ、スクリプト、解析結果は分けて管理するのをおすすめします
+解析の途中で解析結果に関するデータが次々と生じるため、出力結果を整理することをおすすめします。とくに元データと解析結果を混同することがないようにデータと解析結果とは予め分けておくべきです。
+また、解析を行う中でスクリプトも増えていくため、これも分けて管理すべきでしょう
+今回は下記の3つにデータを分けます
+1. Data:元データ
+2. Analysis:解析結果
+3. Scripts:スクリプト
+　
+```{r}
+list.files("./")
+```
+
+# SNP検出結果から数値行列への変換
+vcfファイルに記されたSNP Callingによって検出したSNPにおけるマーカー情報を数値として変換します
+
+
+## ｖｃｆファイルの読み込み
+
+実際のvcfファイルを使って処理を行っていきます
+vcfファイルの処理方法にはvcftoolsなどのソフトがありますが、ここではRのパッケージであるgastonなどを用います
+なお、vcfファイルはRice Diversity Data set (http://ricediversity.org/data/index.cfm) から引っ張ってきたものです
+```{r}
+require(gaston)
+vcf_path = "Data/HDRA-G6-4-RDP1-RDP2-NIAS.AGCT.vcf.gz"
+# read file
+bm <- read.vcf(vcf_path)
+```
+
+```{r}
+bm
+```
+
+下記のようにして各サンプルのcall rateなどを見ることができる
+```{r}
+head(bm@ped)
+```
+
+下記のようにして各座位のリファレンスの遺伝子型、各多型の頻度、call rate、mafなどを見ることができる
+```{r}
+head(bm@snps)
+```
+
+## マイナーアリルの頻度（Minor Allele Frequency: MAF）が低い座位の除去
+
+各座位についてアリル頻度を計算していった際に、少数派のアリル頻度（MAF）があまりにも低い座位は解析から除外します。
+これはこうした座位ではジェノタイピングのエラーによりSNP検出が誤って行われている可能性が高いためです。
+解析から除外する基準が厳密に定められているわけではありませんが、5%未満の座位を除外することが多いようです
+
+### 実践
+
+gastonでは下記の関数を用いることでMAFが一定以下のSNPを除外できる
+
+
+```{r}
+bm.wp <- select.snps(bm, maf > 0.05)
+```
+
+```{r}
+bm.wp
+```
+
+
+```{r}
+head(bm.wp@ped)
+```
+
+mafの低いマーカーが取り除かれたことがわかる
+```{r}
+head(bm.wp@snps)
+```
+
+
+## ATGC表記から数値表記への変換方法について
+
+vcfファイルの中ではマーカー情報がATGC表記で記載されているため、これを数値として変換します。
+例えば、ある座位のSNP多型がAA、AT、TTであるならば
+
+$$AA: +1$$
+
+$$AT: 0$$
+$$TT: -1$$
+
+といったように変換します。
+なお、ヘテロとしてコールされた場合はジェノタイピングのミスも疑われるため、欠測として扱う方もいます。
+
+### 実践
+
+下記の関数を用いることでマーカー情報を数値行列に変換することが可能です。
+なお、そのまま行列に変換すると1500×45,000の巨大な行列が作成されてメモリを逼迫して今後の解析に師匠をきたす恐れがあるため、一旦マーカーの数を減らして処理を行っています。
+
+
+
+```{r}
+bm.wp_small = bm.wp[1:400, 1:2000]
+gt.score <- as.matrix(bm.wp_small)
+```
+
+
+```{r}
+head(gt.score[, 1:20])
+```
+
+## 欠測値の補完
+上記の行列には欠測値が多く、
+ここでは詳しく触れませんが、マーカー情報の欠測値の補完も非常に重要です。
+代表的な手法として、
+1. 各座位の平均値や中央値で補完する
+2. 主成分分析などの統計的手法を応用して補完する
+3. 各マーカーの連鎖の関係などを利用して補完する（beagle, rqtlなど）
+などが挙げられます。
+
+# 各種予測手法について
+原理についてはGianolaスライドxxxxを参照
+
+## GBLUP、リッジ回帰
+MCスライド。を参照（）
+
+### データの読み込み
+```{r}
+# すべてのobject破棄
+rm(list = ls())
+# ゲノムデータ、表現型データのpath
+geno_path = "Data/SpindelData/Spindel_geno.txt"
+pheno_path = "Data/SpindelData/pheno_WS.csv"
+```
+
+### 表現型データの読み込み
+```{r}
+
+pheno <- read.csv(pheno_path)
+dim(pheno)
+```
+
+```{r}
+head(pheno)
+```
+
+### ゲノムデータの読み込み
+```{r}
+geno <- read.table(geno_path,
+sep = "\t", header = T, row.names = 1)
+dim(geno)
+```
+
+このままだとデータがひっくり返っているため表現型データと対応していない。データをひっくり返す
+```{r}
+geno = t(geno)
+dim(geno)
+```
+
+```{r}
+head(geno[, 1:5])
+```
+
+### 遺伝関係行列の計算
+
+
+
+```{r GRM for spindel, echo = T}
+head(geno[,1:5])
+
+Zsc <- scale(x = geno, center = T, scale = T)
+GRM <- tcrossprod(Zsc)/ncol(geno)
+
+dim(GRM)
+
+print(GRM[1:9, 1:9])
+```
+
+なお、ここでは各マーカーについて基準化を行った後に計算を行っている。
+Van Radenの方法を用いたマーカー行列の方法は下記のように実装されている
+
+```{r}
+# 遺伝子型を-1, 0, 1で表記するようにしてから関係行列を推定
+GRM_vr = rrBLUP::A.mat(geno-1)
+
+print(GRM_vr[1:9, 1:9])
+```
+
+
+### gBLUP using rrBLUP package
+
+rrBLUPは制約付き最尤法や最尤法によって線形混合モデル（Linear Mixed Model）を解くパッケージです。
+変量効果（遺伝的効果）だけでなく、誤差項の分散と変量効果（遺伝的効果）の分散も計算可能です。
+
+#### GBLUP
+```{r gBLUP via rrBLUP, echo = T}
+library(rrBLUP)
+
+#MM with rrBLUP regression on G
+gBLUP <- mixed.solve(y = pheno$YLD, K = GRM)
+names(gBLUP)
+
+length(gBLUP$u)
+```
+なお、各オブジェクトは
+1. Vu: 推定された変量効果（遺伝的効果）の分散
+2. Ve: 推定された誤差項の分散
+3. beta: 推定された固定効果の係数
+4. u: 推定された変量効果（遺伝的効果）の平均値
+に対応しています
+
+### rrBLUP using rrBLUP package
+
+#### rrBLUP (Ridge回帰)
+
+```{r rrBLUP via rrBLUP, echo = T}
+library(rrBLUP)
+Zc <- scale(x = geno, center = T, scale = F)
+
+#MM with rrBLUP regression on markers
+rrBLUP <- mixed.solve(y = pheno$YLD, Z = Zc)
+names(rrBLUP)
+
+length(rrBLUP$u)
+```
+
+なお、各オブジェクトは
+1. Vu: 推定された変量効果（遺伝的効果）の分散
+2. Ve: 推定された誤差項の分散
+3. beta: 推定された固定効果の係数
+4. u: 推定されたマーカー効果の平均値
+に対応しています
+
+### Are rrBLUP and gBLUP equivalent?
+
+- Recall $$\hat g = W \hat a$$ 
+
+- Thus, here we'll leverage that to calculate the breeding values (GEBVs) from the predicted marker effects
+
+```{r rrBLUP v gBLUP, echo = T}
+#calculate GEBVs from predicted marker effects
+gBLUP_rr <- Zc %*% rrBLUP$u
+
+gBLUP_YLD <- gBLUP$u + as.numeric(gBLUP$beta)
+gBLUP_rr_YLD <- gBLUP_rr + as.numeric(rrBLUP$beta)
+```
+
+### Are rrBLUP and gBLUP equivalent?
+
+```{r rrBLUP v gBLUP plot, echo = T, fig.height=1.7, fig.width=3.2, fig.align="center"}
+par(mar=c(3,4,0.5,0.5), mgp=c(1.8,0.5,0), xpd = F, cex.lab = 0.5, 
+    cex.axis = 0.5)
+plot(gBLUP_YLD, gBLUP_rr_YLD, ylab = "Predicted YLD (RR-BLUP)", 
+     xlab = "Predicted YLD (gBLUP)", pch = 21, cex = 0.5)
+
+abline(lm(gBLUP_rr_YLD ~ gBLUP_YLD), col = "red")
+
+text(x = 4400, y = 5200, paste0("r = ", 
+  round(cor(gBLUP_YLD, gBLUP_rr_YLD),2)), col = "red", cex = 0.75)
+```
+
+
+### （おまけ）交差検証による予測精度の検証
+作成したモデルはモデル構築用のデータ（訓練データ）に対して過剰に適合しがちです。
+未知のデータに対する予測精度を検証するためには交差検証による予測精度の検証が必要です。
+ここではGBLUPの予測精度を10分割交差検証で評価したいと思います。
+
+#### データの分割
+```{r}
+# おまじない
+set.seed(777)
+# データを分割する数
+nfold = 10
+# データの数
+N <- nrow(GRM)
+# データのindexをfoldの数だけ分割
+holdout <- split(sample(1:N), 1:nfold)
+
+# 予測値を記録するためのベクトル
+y_pred = vector(length=N)
+
+# 形質値の実測値。ここでは草丈にしました
+y_obs = pheno$PH
+
+holdout
+```
+
+#### 交差検証
+```{r}
+for(i in 1:nfold){
+  print(paste("iteration", i))
+  # テストデータと訓練データを選ぶ
+  testIndex = holdout[[i]]
+  trainIndex = (1:N)[-c(testIndex)]
+  
+  # 実測値からテストデータの実測値を消して、訓練データとする
+  y_train = y_obs
+  y_train[testIndex] = NA
+
+  # 予測を実行
+  gBLUP_i <- mixed.solve(y = y_train, K = GRM)
+  
+  # 予測結果の保存
+  prediction = gBLUP_i$u + as.numeric(gBLUP_i$beta)
+  y_pred[testIndex] = prediction[testIndex]
+}
+
+```
+
+#### 予測結果の図示
+```{r echo = T, fig.height=1.7, fig.width=3.2, fig.align="center"}
+par(mar=c(3,4,0.5,0.5), mgp=c(1.8,0.5,0), xpd = F, cex.lab = 0.5, 
+    cex.axis = 0.5)
+plot(y_train, y_pred, ylab = "Observed YLD", 
+     xlab = "Predicted YLD (gBLUP)", pch = 21, cex = 0.5)
+
+abline(lm(y_pred ~ y_obs), col = "red")
+
+text(x = 100, y = 120, paste0("r = ", 
+  round(cor(y_obs, y_pred, use="pairwise"),2)), col = "red", cex = 0.75)
+```
+
+## その他の機械学習手法
+
+上記の手法だけでなく通常の機械学習手法も予測に用いることが可能です
+
+### リッジ回帰
+```{r}
+library(glmnet)
+
+# パラメーターの推定
+# ここでは考査検証の誤差が最も小さくなるようにλを推定する
+ridge.cv = cv.glmnet(x=Zc, y=y_obs, nfolds = 3, alpha=0)
+ridge_model = glmnet(x=Zc, y=y_obs, lambda = ridge.cv$lambda.min, alpha=0)
+```
+
+```{r}
+plot(ridge_model$beta)
+```
+
+
+### ラッソ回帰
+
+```{r}
+# パラメーターの推定
+# ここでは考査検証の誤差が最も小さくなるようにλを推定する
+
+lasso.cv = cv.glmnet(x=Zc, y=y_obs, nfolds = 3, alpha=1)
+lasso_model = glmnet(x=Zc, y=y_obs, lambda = lasso.cv$lambda.min, alpha=1)
+```
+
+```{r}
+plot(lasso_model$beta)
+```
+
+### ランダムフォレスト
+```{r}
+library(randomForest)
+
+oob.err=double(13)
+test.err=double(13)
+
+#mtry is no of Variables randomly chosen at each split
+for(mtry in 1:13) 
+{
+  rf=randomForest(medv ~ . , data = Boston , subset = train,mtry=mtry,ntree=400) 
+  oob.err[mtry] = rf$mse[400] #Error of all Trees fitted
+  
+  pred<-predict(rf,Boston[-train,]) #Predictions on Test Set for each Tree
+  test.err[mtry]= with(Boston[-train,], mean( (medv - pred)^2)) #Mean Squared Test Error
+  
+  cat(mtry," ") #printing the output to the console
+  
+}
+```
+
+
+# MCMCのかんたんな説明
+
+# ベイズ的なモデルの実装
+
+## ベイジアンリッジ回帰
+```{r}
+library(BGLR)
+
+dir_save = "Analysis/BRR/"
+dir.create(dir_save)
+
+test_loc = sample(1:length(y_obs), size=50)
+
+X=Zc
+y=y_obs
+y[test_loc] = NA
+
+fm=BGLR(y=y,ETA=list(list(X=X,model='BRR')),  nIter = 10000,
+       burnIn = 1000, saveAt = dir_save)
+ fm$varE
+ fm$ETA[[1]]$varB
+```
+
+
+MCMCのサンプリング結果は下記のファイルに記されています
+```{r}
+list.files(dir_save)
+```
+
+### パラメーターの収束の確認
+```{r}
+path_mu = paste0(dir_save, "mu.dat")
+path_varw = paste0(dir_save, "ETA_1_varB.dat")
+path_vare = paste0(dir_save, "varE.dat")
+
+trace_mu = read.table(path_mu)
+trace_varw = read.table(path_varw)
+trace_vare = read.table(path_vare)
+
+par(mfrow=c(2,2))
+plot(trace_mu$V1[-c(1:200)])
+plot(trace_varw$V1[-c(1:200)])
+plot(trace_vare$V1[-c(1:200)])
+par(mfrow=c(1,1))
+```
+
+今回は遺伝分散のパラメーターが収束していなさそう（分散のパラメータは平均値などよりも収束しにくいらしいが）
+
+### 実測値と予測値のプロット
+```{r}
+plot(y_obs[test_loc], fm$yHat[test_loc])
+abline(a=0, b=1)
+
+correlation = cor(y_obs[test_loc], fm$yHat[test_loc])
+rmse = sqrt(sum((y_obs[test_loc]- fm$yHat[test_loc])^2))
+print(paste("RMSE =", rmse,  "r =", correlation))
+```
+
+
+## ベイジアンGBLUP
+```{r}
+library(BGLR)
+
+dir_save = "Analysis/BGBLUP/"
+dir.create(dir_save)
+
+# 今回はマーカー行列ではなく遺伝関係行列を用いて回帰を行う
+K=GRM
+
+fm=BGLR(y=y,ETA=list(list(K=K,model='RKHS')),  nIter = 10000,
+       burnIn = 1000, saveAt = dir_save)
+ fm$varE
+ fm$ETA[[1]]$varU
+```
+
+
+
+MCMCのサンプリング結果は下記のファイルに記されています
+```{r}
+list.files(dir_save)
+```
+
+### パラメーターの収束を確認
+
+```{r}
+path_mu = paste0(dir_save, "mu.dat")
+path_varw = paste0(dir_save, "ETA_1_varU.dat")
+path_vare = paste0(dir_save, "varE.dat")
+
+trace_mu = read.table(path_mu)
+trace_varw = read.table(path_varw)
+trace_vare = read.table(path_vare)
+trace_varh = (trace_varw$V1)/(trace_varw$V1+trace_vare$V1)
+
+titles = paste0("Trace plot of ", c("mean", "genetic variance", "error variance", "heritability"))
+
+par(mfrow=c(2,2))
+plot(trace_mu$V1[-c(1:200)], main=titles[1])
+plot(trace_varw$V1[-c(1:200)], main=titles[2])
+plot(trace_vare$V1[-c(1:200)], main=titles[3])
+plot(trace_varh[-c(1:200)], main=titles[4])
+par(mfrow=c(1,1))
+
+```
+
+今回はどのパラメーターも収束していそう。
+なお遺伝率${h^2}$は
+$$h^2=\sigma^2_g/(\sigma^2_g+\sigma^2_e)$$
+と計算される。
+
+### 実測値と予測値のプロット
+```{r}
+plot(y_obs[test_loc], fm$yHat[test_loc])
+abline(a=0, b=1)
+
+correlation = cor(y_obs[test_loc], fm$yHat[test_loc])
+rmse = sqrt(sum((y_obs[test_loc]- fm$yHat[test_loc])^2))
+print(paste("RMSE =", rmse,  "r =", correlation))
+```
+
+## ベイズA
+
+## ベイズC
+
+## ベイズR
+
+```{r}
+library(BGLR)
+
+dir_save = "Analysis/BLASSO/"
+dir.create(dir_save)
+
+# 今回はマーカー行列ではなく遺伝関係行列を用いて回帰を行う
+K=GRM
+
+fm=BGLR(y=y,ETA=list(list(X=Zc,model='BL')),  nIter = 10000,
+       burnIn = 1000, saveAt = dir_save)
+ fm$varE
+ fm$ETA[[1]]$varU
+```
+
+```{r}
+plot(fm[])
+```
+
+
+
+# カーネル回帰
+
+ここではガウスカーネルを用いた回帰を試します。
+まず各サンプルの距離行列Dを用意します。このときDのij成分${D_{ij}}$は
+$$D_{ij} = ||x_{i}-x_{j}||^2_2$$
+です
+
+```{r}
+distmat_pre = as.matrix(dist(Zc))
+D = distmat_pre/median(distmat_pre[upper.tri(distmat_pre)]) 
+
+```
+
+
+## RMELによる推定（rrBLUP）
+```{r}
+data_df = data.frame(pheno=y, gid=pheno$GHID)
+
+rkhs_model = kin.blup(data=data_df,geno="gid",pheno="pheno",GAUSS=TRUE,K=D,fixed=NULL,covariate=NULL,
+                      PEV=FALSE,n.core=3,theta.seq=NULL)
+
+```
+
+### 実測値と予測値のプロット
+```{r}
+plot(y_obs[test_loc], rkhs_model$pred[test_loc])
+abline(a=0, b=1)
+
+correlation = cor(y_obs[test_loc], rkhs_model$pred[test_loc])
+rmse = sqrt(sum((y_obs[test_loc]- rkhs_model$pred[test_loc])^2))
+print(paste("RMSE =", rmse,  "r =", correlation))
+```
+
+
+## Bayesモデルによる推定（BGLR）
+```{r}
+dir_save = "Analysis/GAUSS_kernel/"
+dir.create(dir_save)
+
+# 今回はマーカー行列ではなく遺伝関係行列を用いて回帰を行う
+K=exp(-D)
+
+fm=BGLR(y=y,ETA=list(list(K=K,model='RKHS')),  nIter = 10000,
+       burnIn = 1000, saveAt = dir_save)
+fm$varE
+fm$ETA[[1]]$varU
+```
+
+### パラメーターの収束を確認
+
+```{r}
+path_mu = paste0(dir_save, "mu.dat")
+path_varw = paste0(dir_save, "ETA_1_varU.dat")
+path_vare = paste0(dir_save, "varE.dat")
+
+trace_mu = read.table(path_mu)
+trace_varw = read.table(path_varw)
+trace_vare = read.table(path_vare)
+trace_varh = (trace_varw$V1)/(trace_varw$V1+trace_vare$V1)
+
+titles = paste0("Trace plot of ", c("mean", "genetic variance", "error variance", "heritability"))
+
+par(mfrow=c(2,2))
+plot(trace_mu$V1[-c(1:200)], main=titles[1])
+plot(trace_varw$V1[-c(1:200)], main=titles[2])
+plot(trace_vare$V1[-c(1:200)], main=titles[3])
+plot(trace_varh[-c(1:200)], main=titles[4])
+par(mfrow=c(1,1))
+
+```
+
+
+### 実測値と予測値のプロット
+```{r}
+plot(y_obs[test_loc], fm$yHat[test_loc])
+abline(a=0, b=1)
+
+correlation = cor(y_obs[test_loc], fm$yHat[test_loc])
+rmse = sqrt(sum((y_obs[test_loc]- fm$yHat[test_loc])^2))
+print(paste("RMSE =", rmse,  "r =", correlation))
+```
+
+
+# 複数形質の予測モデル
+
+## 複数環境または複数形質のモデリング
+MTM
+
+## 複数環境＋複数形質のモデリング
+BMTME
+
+### 余談
+1. 原著論文によると同手法は非常に収束が遅く、収束するまでにMCMCを6万回回す必要があったとのこと
+2. 同パッケージにはMCMCの結果がどこにも出力されない（ように見える）ため、パラメーター推定が収束したかどうかを判断することが非常に難しいと思います。
